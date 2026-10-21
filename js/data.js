@@ -22,8 +22,18 @@ async function fetchAll(q){const out=[];for(let i=0;;i+=1000){const {data,error}
 
 // Returns "" when the signed-in user may open this area, otherwise a message to show on the login page.
 async function boot(role){
- const {data:{session}}=await sb.auth.getSession();if(!session)return "Please sign in.";
- if(role=="admin"){const {data}=await sb.rpc("is_admin");return data?"":"This account is not a platform admin."}
+ const wait=ms=>new Promise(r=>setTimeout(r,ms));
+ let {data:{session}}=await sb.auth.getSession();
+ if(!session){await wait(500);({data:{session}}=await sb.auth.getSession())}   // one retry: the saved session can be a moment late after a refresh
+ if(!session)return "Please sign in.";
+ if(role=="admin"){
+  // Only an explicit "false" from the database means "not an admin". Errors never log the admin out; they show a reload message instead.
+  for(let i=0;i<2;i++){
+   const {data,error}=await sb.rpc("is_admin");
+   if(!error&&data===true)return "";
+   if(!error&&data===false&&i==1)return "This account is not a platform admin.";
+   if(i==0)await wait(500)}
+  throw new Error("Could not verify admin access. Please reload the page.")}
  const {data:a,error}=await sb.from("agencies").select("id,name,email,logo_key,status,plan,expires,requested").eq("user_id",session.user.id).maybeSingle();
  if(error)throw error;
  if(!a)return "No agency account found for this login.";
