@@ -167,8 +167,9 @@ window.addEventListener("popstate",()=>{const p=(location.pathname.split("/").po
  if(page=="apply")return await pages.apply();
  document.body.insertAdjacentHTML("afterbegin",`<div style="padding:40px;font:15px 'DM Sans',sans-serif;color:#5b6078">Loading...</div>`);
  const role=page=="admin"?"admin":"agency";
- const data=(role=="admin"?loadAdminData():loadAgencyData()).catch(e=>e||new Error("load failed"));  // start loading data while the access check runs
- const why=await boot(role);if(why)return go(why);
- const err=await data;if(err)throw err;
+ // Agency: load data while the access check runs (faster). Admin: check access first, then load.
+ const data=role=="admin"?null:loadAgencyData().catch(e=>e||new Error("load failed"));
+ const why=await boot(role);if(why){console.warn("HirePool access:",why);return go(why)}
+ const err=role=="admin"?await loadAdminData().then(()=>0,e=>e||new Error("load failed")):await data;if(err)throw err;
  stamp=Date.now();pages[page]?.()
 }catch(e){console.error(e);document.body.innerHTML=`<div class="center"><div class="card"><h2>Something went wrong</h2><p style="color:var(--mut)">${esc(e?.message||"Could not load your data.")} Check your connection and try again.</p><button class="btn" onclick="location.reload()">Reload</button> <button class="btn sec" onclick="logout()">Logout</button></div></div>`}})();
