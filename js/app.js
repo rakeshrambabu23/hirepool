@@ -10,6 +10,39 @@ const linkFor=id=>location.href.split("?")[0].replace(/[^\/]*$/,"")+"apply.html?
 const waLink=j=>"https://wa.me/?text="+encodeURIComponent(`Hiring: ${j.heading}\nPositions: ${j.positions.slice(0,6).join(", ")}${j.positions.length>6?" and "+(j.positions.length-6)+" more":""}\nApply here: ${linkFor(j.id)}`);
 const copy=t=>{navigator.clipboard?.writeText(t);toast("Copied")};
 const when=s=>new Date(s).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"});
+// ---- Auto-delete helpers: days left, and "download shortlisted" (CSV + resumes in one ZIP) ----
+const daysLeft=j=>j.expires?Math.max(0,Math.ceil((new Date(j.expires)-Date.now())/864e5)):RETENTION_DAYS;
+const inDays=n=>n<=0?"today":n==1?"in 1 day":`in ${n} days`;
+const shortlisted=id=>cands.filter(c=>c.job==id&&SHORTLISTED.includes(c.status));
+const csvCell=(v,raw)=>{let s=String(v??"");if(!raw&&/^[=+\-@\t\r]/.test(s))s="'"+s;return'"'+s.replace(/"/g,'""')+'"'};
+const safeName=s=>String(s||"").replace(/[^\w\- ]+/g,"").trim().replace(/\s+/g,"_").slice(0,60)||"file";
+const saveBlob=(b,n)=>{const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download=n;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),60000)};
+const loadZip=()=>window.JSZip?Promise.resolve(window.JSZip):new Promise((ok,no)=>{const s=document.createElement("script");s.src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";s.onload=()=>window.JSZip?ok(window.JSZip):no(new Error("zip"));s.onerror=()=>no(new Error("zip"));document.head.append(s)});
+let dlBusy=false;
+async function dlShortlisted(id){
+ const j=jobs.find(x=>x.id==id),list=shortlisted(id);
+ if(!j)return;if(!list.length)return toast("No shortlisted candidates in this post yet.");
+ if(dlBusy)return toast("A download is already running.");dlBusy=true;
+ try{
+  toast(`Preparing ${list.length} shortlisted candidate${list.length>1?"s":""}...`);
+  let zip=null;try{zip=new(await loadZip())()}catch(e){}
+  const file=new Map(),used=new Set(),withCv=list.filter(c=>c.hasResume);let i=0,failed=0;
+  if(zip){const worker=async()=>{while(i<withCv.length){const c=withCv[i++];try{
+   const r=await fetch(await resumeUrl(c.key,false));if(!r.ok)throw new Error("fetch");
+   const base=safeName(c.name+"_"+c.position);let k=base,n=1;while(used.has(k))k=base+"_"+(++n);used.add(k);
+   zip.file("resumes/"+k+".pdf",await r.blob());file.set(c.id,k+".pdf")}catch(e){failed++}}};
+   await Promise.all([worker(),worker(),worker()])}
+  const head=["Name","Email","Phone","Position","Experience (yrs)","Current location","Preferred location","Certifications","Status","Applied on","Resume file"];
+  const rows=[head,...list.map(c=>[c.name,c.email,c.phone,c.position,c.exp,c.loc,c.pref,c.certs.join("; "),c.status,c.date,file.get(c.id)||""])];
+  const csv="\ufeff"+rows.map((r,ri)=>r.map(v=>csvCell(v,ri==0)).join(",")).join("\r\n");
+  const nm=safeName(j.heading)+"_shortlisted";
+  if(zip){zip.file("shortlisted.csv",csv);saveBlob(await zip.generateAsync({type:"blob"}),nm+".zip")}
+  else saveBlob(new Blob([csv],{type:"text/csv"}),nm+".csv");
+  toast(!zip?"Downloaded the list only (resume download needs internet access to the zip tool).":failed?`Downloaded. ${failed} resume${failed>1?"s":""} could not be added.`:"Downloaded.")
+ }catch(e){fail(e)}finally{dlBusy=false}}
+const expiryAlerts=()=>{const soon=jobs.filter(j=>daysLeft(j)<=3).sort((a,b)=>daysLeft(a)-daysLeft(b));
+ return soon.map(j=>{const n=daysLeft(j),s=shortlisted(j.id).length;return`<div class="alert${n<=1?" hot":""}"><div><b>${esc(j.heading)}</b> will be deleted ${inDays(n)}, with all ${appCount(j.id)} candidates and resumes.<br><small>${s?`Download your ${s} shortlisted candidate${s>1?"s":""} before it is gone.`:"There are no shortlisted candidates in this post."}</small></div>${s?`<button class="btn sm" onclick="dlShortlisted('${j.id}')">Download shortlisted</button>`:""}</div>`}).join("")
+ +`<div class="banner">Job posts and all their candidates are deleted automatically ${RETENTION_DAYS} days after posting. Shortlist the people you want and download them before then.</div>`};
 let page=document.body.dataset.page,Q=new URLSearchParams(location.search),stamp=0;
 function shell(role,active,title,html){const a=role=="agency"?profile:null;
  const links=role=="admin"?[["admin.html","Overview"]]:[["dashboard.html","Dashboard"],["jobs.html","Jobs"],["candidates.html","Candidates"]];
@@ -35,7 +68,7 @@ function openCreate(after,job){let edited=false;
  <div style="display:flex;gap:6px;margin-top:8px"><input id="po" placeholder="Other position (type and press Add)" style="flex:1"><button type="button" class="btn sec sm" id="pa">Add</button></div>
  <div class="two"><div><label>Last date to apply</label><input id="jd" type="date"></div><div><label>&nbsp;</label><span class="checks"><label><input type="checkbox" id="ju"> Mark as urgent</label></span></div></div>
  <label>Description (optional)</label><textarea id="jt" rows="2" maxlength="4000" placeholder="Salary, visa, accommodation, interview date..."></textarea>
- <div class="always"><b>Always on the form:</b> name, phone, email, experience, locations, skills, resume (PDF), consent. Candidates pick one of the positions above.</div>
+ <div class="always"><b>Auto-delete:</b> this post and all its candidates are deleted ${RETENTION_DAYS} days after posting. Download your shortlisted candidates before then.<br><br><b>Always on the form:</b> name, phone, email, experience, locations, skills, resume (PDF), consent. Candidates pick one of the positions above.</div>
  <div class="err" id="je2"></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn sec" id="cx">Cancel</button>${!job||job.status=="Draft"?`<button class="btn sec" id="jdr">Save as draft</button>`:""}<button class="btn" id="jsv">${job?(job.status=="Draft"?"Publish":"Save changes"):"Create and get link"}</button></div></div>`;
  $("#modal").classList.add("open");$("#cx").onclick=close;
  const val=(s,o)=>$(s).value=="__other"?$(o).value.trim():$(s).value;
@@ -70,10 +103,10 @@ function openCreate(after,job){let edited=false;
 const cbtn=()=>{$("#acts").innerHTML=`<button class="btn" id="nj">+ Create job post</button>`;$("#nj").onclick=()=>openCreate(()=>pages[page]())};
 const pages={
 dashboard(){const mx=Math.max(1,...jobs.map(j=>appCount(j.id)));
- shell("agency","dashboard.html","Dashboard",`<div class="grid g4">${stat("Total candidates",cands.length)}${stat("Active job posts",jobs.filter(j=>j.status=="Open").length)}${stat("New applications",cands.filter(c=>c.status=="New").length)}${stat("Shortlisted",cands.filter(c=>c.status=="Shortlisted").length)}</div>
+ shell("agency","dashboard.html","Dashboard",`${expiryAlerts()}<div class="grid g4">${stat("Total candidates",cands.length)}${stat("Active job posts",jobs.filter(j=>j.status=="Open").length)}${stat("New applications",cands.filter(c=>c.status=="New").length)}${stat("Shortlisted",cands.filter(c=>c.status=="Shortlisted").length)}</div>
  <div class="card" style="margin-top:14px"><h2>Job posts and applicants</h2><div class="tw"><table><thead><tr><th>Post</th><th>Positions</th><th>Status</th><th>Applicants</th><th></th></tr></thead><tbody>${jobs.map(j=>`<tr class="row" onclick="nav('candidates','job=${j.id}')"><td><b>${esc(j.heading)}</b>${j.urgent?' <span class="badge Urgent">Urgent</span>':""}</td><td>${j.positions.length}</td><td>${badge(j.status)}</td><td><b>${appCount(j.id)}</b></td><td style="min-width:120px"><div class="prog"><i style="width:${appCount(j.id)/mx*100}%"></i></div></td></tr>`).join("")||`<tr><td colspan=5 class="empty">No job posts yet. Create your first one.</td></tr>`}</tbody></table></div></div>`);cbtn()},
-jobs(){const draw=()=>{$("#jl").innerHTML=jobs.map(j=>{const n=appCount(j.id);return`<div class="card post"><div class="ph"><div><h2>${esc(j.heading)}${j.urgent?' <span class="badge Urgent">Urgent</span>':""} ${badge(j.status)}</h2><small>${j.positions.length} positions · ${n} applicants · posted ${j.posted}${j.deadline?" · apply by "+esc(j.deadline):""}</small></div>
-  <div class="pa">${j.status=="Draft"?"":`<button class="btn sec sm" onclick="copy(linkFor('${j.id}'))">Copy link</button><a class="btn sec sm" target="_blank" rel="noopener" href="${waLink(j)}">WhatsApp</a>`}<button class="btn sec sm" onclick="editJob('${j.id}')">Edit</button><button class="btn sec sm" onclick="setJob('${j.id}')">${j.status=="Open"?"Close":j.status=="Draft"?"Publish":"Reopen"}</button><button class="btn red sm" onclick="delJob('${j.id}')">Delete</button></div></div>
+jobs(){const draw=()=>{$("#jl").innerHTML=jobs.map(j=>{const n=appCount(j.id);return`<div class="card post"><div class="ph"><div><h2>${esc(j.heading)}${j.urgent?' <span class="badge Urgent">Urgent</span>':""} ${badge(j.status)}</h2><small>${j.positions.length} positions · ${n} applicants · posted ${j.posted}${j.deadline?" · apply by "+esc(j.deadline):""} · <b style="color:${daysLeft(j)<=3?"var(--bad)":"inherit"}">auto-deletes ${inDays(daysLeft(j))}</b></small></div>
+  <div class="pa">${j.status=="Draft"?"":`<button class="btn sec sm" onclick="copy(linkFor('${j.id}'))">Copy link</button><a class="btn sec sm" target="_blank" rel="noopener" href="${waLink(j)}">WhatsApp</a>`}<button class="btn sec sm" onclick="dlShortlisted('${j.id}')">Download shortlisted (${shortlisted(j.id).length})</button><button class="btn sec sm" onclick="editJob('${j.id}')">Edit</button><button class="btn sec sm" onclick="setJob('${j.id}')">${j.status=="Open"?"Close":j.status=="Draft"?"Publish":"Reopen"}</button><button class="btn red sm" onclick="delJob('${j.id}')">Delete</button></div></div>
   <div class="tw"><table><thead><tr><th>Position</th><th>Applicants</th><th></th></tr></thead><tbody>${j.positions.map(p=>{const c=cands.filter(x=>x.job==j.id&&x.position==p).length;return`<tr class="row" onclick="nav('candidates','job=${j.id}&pos='+encodeURIComponent(this.dataset.p))" data-p="${esc(p)}"><td>${esc(p)}</td><td><b>${c}</b></td><td style="width:40%"><div class="prog"><i style="width:${n?c/n*100:0}%"></i></div></td></tr>`}).join("")}</tbody></table></div></div>`}).join("")||`<div class="card empty">No job posts yet. Create your first one.</div>`};
  shell("agency","jobs.html","Job posts",`<div id="jl" class="grid"></div>`);cbtn();draw();
  window.editJob=id=>openCreate(draw,jobs.find(x=>x.id==id));
@@ -116,10 +149,10 @@ admin(){const showCode=a=>{const url=location.href.replace(/[^\/]*$/,"")+"index.
   $("#st").innerHTML=stat("Agencies",rest.length)+stat("Active",rest.filter(a=>a.status=="Active").length)+stat("Signup requests",pend.length)+stat("Suspended",rest.filter(a=>a.status=="Suspended").length);
   const S=adminStats;$("#st2").innerHTML=stat("Total jobs",S.jobs??0)+stat("Total applications",S.applications??0)+stat("Resume storage used",fmtB(S.storage_bytes))+stat("Applications (7 days)",S.new_apps_7d??0);
   $("#act").textContent=`${S.new_agencies_7d??0} new agency signups · ${S.new_jobs_7d??0} new job posts · ${S.new_apps_7d??0} new applications`;
-  $("#rq").innerHTML=pend.map(a=>`<tr><td>${av(a)} <b>${esc(a.name)}</b></td><td>${esc(a.email)}</td><td>${esc(a.plan)}</td><td>${esc(a.requested)}</td><td><button class="btn sm" onclick="approve('${a.id}')">Approve</button> <button class="btn red sm" onclick="rej('${a.id}')">Reject</button></td></tr>`).join("")||`<tr><td colspan=5 class="empty">No pending signup requests.</td></tr>`;
-  $("#ag").innerHTML=rest.map(a=>`<tr><td>${av(a)} <b>${esc(a.name)}</b></td><td>${esc(a.email)}</td><td>${esc(a.plan||"-")}</td><td>${esc(a.expires||"-")}</td><td>${badge(a.status)}</td><td>${usage[a.id]?.jobs??0}</td><td>${usage[a.id]?.applications??0}</td><td>${fmtB(usage[a.id]?.storage_bytes)}</td><td><code>${esc(a.code||"-")}</code></td><td>${a.status=="Rejected"?"":`<button class="btn sec sm" onclick="tog('${a.id}')">${a.status=="Active"?"Suspend":"Reactivate"}</button> <button class="btn sec sm" onclick="regen('${a.id}')">New code</button>`}</td></tr>`).join("")||`<tr><td colspan=10 class="empty">No agencies yet.</td></tr>`};
- shell("admin","admin.html","Platform overview",`<div class="grid g4" id="st"></div><div class="grid g4" id="st2" style="margin-top:14px"></div><div class="card" style="margin-top:14px"><h2>Platform activity (last 7 days)</h2><p id="act" style="margin:0;color:var(--mut)"></p></div><div class="card" style="margin-top:14px"><h2>Signup requests</h2><div class="tw"><table><thead><tr><th>Agency</th><th>Email</th><th>Plan requested</th><th>Requested</th><th></th></tr></thead><tbody id="rq"></tbody></table></div></div>
- <div class="card" style="margin-top:14px"><h2>Agencies</h2><div class="tw"><table><thead><tr><th>Agency</th><th>Email</th><th>Plan</th><th>Valid until</th><th>Status</th><th>Jobs</th><th>Applicants</th><th>Storage</th><th>Access code</th><th></th></tr></thead><tbody id="ag"></tbody></table></div></div>`);draw();
+  $("#rq").innerHTML=pend.map(a=>`<tr><td>${av(a)} <b>${esc(a.name)}</b></td><td>${esc(a.email)}</td><td>${esc(a.phone||"-")}</td><td>${esc(a.plan)}</td><td>${esc(a.requested)}</td><td><button class="btn sm" onclick="approve('${a.id}')">Approve</button> <button class="btn red sm" onclick="rej('${a.id}')">Reject</button></td></tr>`).join("")||`<tr><td colspan=6 class="empty">No pending signup requests.</td></tr>`;
+  $("#ag").innerHTML=rest.map(a=>`<tr><td>${av(a)} <b>${esc(a.name)}</b></td><td>${esc(a.email)}</td><td>${esc(a.phone||"-")}</td><td>${esc(a.plan||"-")}</td><td>${esc(a.expires||"-")}</td><td>${badge(a.status)}</td><td>${usage[a.id]?.jobs??0}</td><td>${usage[a.id]?.applications??0}</td><td>${fmtB(usage[a.id]?.storage_bytes)}</td><td><code>${esc(a.code||"-")}</code></td><td>${a.status=="Rejected"?"":`<button class="btn sec sm" onclick="tog('${a.id}')">${a.status=="Active"?"Suspend":"Reactivate"}</button> <button class="btn sec sm" onclick="regen('${a.id}')">New code</button>`}</td></tr>`).join("")||`<tr><td colspan=11 class="empty">No agencies yet.</td></tr>`};
+ shell("admin","admin.html","Platform overview",`<div class="grid g4" id="st"></div><div class="grid g4" id="st2" style="margin-top:14px"></div><div class="card" style="margin-top:14px"><h2>Platform activity (last 7 days)</h2><p id="act" style="margin:0;color:var(--mut)"></p></div><div class="card" style="margin-top:14px"><h2>Signup requests</h2><div class="tw"><table><thead><tr><th>Agency</th><th>Email</th><th>Mobile</th><th>Plan requested</th><th>Requested</th><th></th></tr></thead><tbody id="rq"></tbody></table></div></div>
+ <div class="card" style="margin-top:14px"><h2>Agencies</h2><div class="tw"><table><thead><tr><th>Agency</th><th>Email</th><th>Mobile</th><th>Plan</th><th>Valid until</th><th>Status</th><th>Jobs</th><th>Applicants</th><th>Storage</th><th>Access code</th><th></th></tr></thead><tbody id="ag"></tbody></table></div></div>`);draw();
  const upd=(a,row)=>{Object.assign(a,mapAcc(row));draw()};
  window.approve=id=>{const a=accounts.find(x=>x.id==id);$("#modal").innerHTML=`<div class="card"><h2>Approve ${esc(a.name)}</h2><p style="color:var(--mut)">Confirm payment, choose the plan, then generate a unique access code.</p><label>Plan</label><select id="pm"><option value="1">1 month (₹4,999)</option><option value="3">3 months (₹11,999)</option><option value="6">6 months (custom price)</option></select><div class="err" id="ae"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px"><button class="btn sec" id="cx">Cancel</button><button class="btn" id="ok">Approve and generate code</button></div></div>`;
   $("#modal").classList.add("open");$("#pm").value=parseInt(a.plan)||1;$("#cx").onclick=close;
@@ -170,6 +203,7 @@ window.addEventListener("popstate",()=>{const p=(location.pathname.split("/").po
  // Agency: load data while the access check runs (faster). Admin: check access first, then load.
  const data=role=="admin"?null:loadAgencyData().catch(e=>e||new Error("load failed"));
  const why=await boot(role);if(why){console.warn("HirePool access:",why);return go(why)}
+ sweep();
  const err=role=="admin"?await loadAdminData().then(()=>0,e=>e||new Error("load failed")):await data;if(err)throw err;
  stamp=Date.now();pages[page]?.()
 }catch(e){console.error(e);document.body.innerHTML=`<div class="center"><div class="card"><h2>Something went wrong</h2><p style="color:var(--mut)">${esc(e?.message||"Could not load your data.")} Check your connection and try again.</p><button class="btn" onclick="location.reload()">Reload</button> <button class="btn sec" onclick="logout()">Logout</button></div></div>`}})();
